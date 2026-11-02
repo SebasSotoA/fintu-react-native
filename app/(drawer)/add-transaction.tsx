@@ -2,6 +2,9 @@ import { router, useLocalSearchParams } from "expo-router";
 import React, { useEffect, useState } from "react";
 import {
   Alert,
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
   ScrollView,
   StatusBar,
   Text,
@@ -14,12 +17,20 @@ import {
   useSafeAreaInsets,
 } from "react-native-safe-area-context";
 // Removido DateTimePicker - no compatible con Expo Go
-import Calculator from "../../components/Calculator";
 import { useApp } from "../../src/shared/context/AppProvider";
 import { formStyles } from "../../src/shared/styles/components";
 import { addTransactionStyles } from "../../src/shared/styles/components/add-transaction";
 import { singleDateCalendarStyles } from "../../src/shared/styles/components/single-date-calendar";
 import { colors, spacing } from "../../src/shared/styles/tokens";
+import {
+  handleCalculatorBackspace as calcBackspace,
+  handleClear as calcClear,
+  handleCalculatorDecimal as calcDecimal,
+  handleCalculatorInput as calcInput,
+  handleParenthesis as calcParenthesis,
+  evaluateExpression,
+  MAX_AMOUNT,
+} from "../../src/shared/utils/calculator-helpers";
 import { TransactionType } from "../../types/transaction";
 
 // Importar SVGs
@@ -254,7 +265,13 @@ export default function AddTransaction() {
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [selectedAccount, setSelectedAccount] = useState(currentAccount);
   const [showAccountSelector, setShowAccountSelector] = useState(false);
-  const [calcResetKey, setCalcResetKey] = useState(0);
+  const [isAmountFocused, setIsAmountFocused] = useState(false);
+  const [isKeyboardVisible, setIsKeyboardVisible] = useState(false);
+  const [expression, setExpression] = useState("0");
+  const deleteIntervalRef = React.useRef<NodeJS.Timeout | null>(null);
+  const deleteTimeoutRef = React.useRef<NodeJS.Timeout | null>(null);
+  const [validationError, setValidationError] = useState<string>("");
+  const [lastValidAmount, setLastValidAmount] = useState("0");
 
   // Restaurar datos cuando se regrese desde choose-category (solo si hay parámetros)
   useEffect(() => {
@@ -277,7 +294,6 @@ export default function AddTransaction() {
       setNote("");
       setSelectedDate(new Date());
       setTransactionType("GASTO");
-      setCalcResetKey(prev => prev + 1);
     }
   }, [params.type, params.amount, params.date, params.note, params.accountId, accounts]);
 
@@ -287,6 +303,23 @@ export default function AddTransaction() {
       setSelectedAccount(currentAccount);
     }
   }, [currentAccount, selectedAccount?.id]);
+
+  // Detectar cuando el teclado está visible
+  useEffect(() => {
+    const keyboardWillShow = Keyboard.addListener(
+      Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow",
+      () => setIsKeyboardVisible(true)
+    );
+    const keyboardWillHide = Keyboard.addListener(
+      Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide",
+      () => setIsKeyboardVisible(false)
+    );
+
+    return () => {
+      keyboardWillShow.remove();
+      keyboardWillHide.remove();
+    };
+  }, []);
 
   const formatDate = (date: Date) => {
     const days = [
@@ -326,9 +359,14 @@ export default function AddTransaction() {
   };
 
   const handleContinue = () => {
-    if (parseFloat(amount) <= 0) {
-      Alert.alert("Error", "El monto debe ser mayor a 0");
-      return;
+    const amountValue = parseFloat(amount);
+    
+    if (amountValue <= 0 || isNaN(amountValue)) {
+      return; // Silently prevent navigation
+    }
+
+    if (amountValue > MAX_AMOUNT) {
+      return; // Silently prevent navigation
     }
 
     if (!selectedAccount) {
@@ -337,7 +375,6 @@ export default function AddTransaction() {
     }
 
     // Navegar a la pantalla de elegir categoría
-    // Pasamos los datos como parámetros
     router.push({
       pathname: "/(drawer)/choose-category",
       params: {
@@ -357,6 +394,104 @@ export default function AddTransaction() {
       router.push("/(drawer)/");
     }
   };
+
+  const handleNumberPress = (num: string) => {
+    setAmount((prev) => {
+      if (prev === "0") {
+        return num;
+      }
+      return prev + num;
+    });
+  };
+
+  const handleDecimalPress = () => {
+    setAmount((prev) => {
+      if (prev.includes(".")) {
+        return prev;
+      }
+      return prev + ".";
+    });
+  };
+
+  const handleBackspace = () => {
+    setAmount((prev) => {
+      if (prev.length <= 1) {
+        return "0";
+      }
+      return prev.slice(0, -1);
+    });
+  };
+
+  const handleClear = () => {
+    const result = calcClear();
+    setAmount("0");
+    setExpression(result.expression);
+    setValidationError(result.validationError);
+    setLastValidAmount(result.lastValidAmount);
+  };
+
+  const handleParenthesis = () => {
+    setExpression((prev) => calcParenthesis(prev));
+  };
+
+  const handleCalculatorInput = (input: string) => {
+    setExpression((prev) => calcInput(input, prev));
+  };
+
+  const handleCalculatorDecimal = () => {
+    setExpression((prev) => calcDecimal(prev));
+  };
+
+  const handleCalculatorBackspace = () => {
+    setExpression((prev) => calcBackspace(prev));
+  };
+
+  const handleBackspaceStart = () => {
+    // Borrar una vez inmediatamente
+    handleCalculatorBackspace();
+    
+    // Iniciar borrado continuo después de 500ms
+    deleteTimeoutRef.current = setTimeout(() => {
+      deleteIntervalRef.current = setInterval(() => {
+        handleCalculatorBackspace();
+      }, 100); // Borrar cada 100ms
+    }, 400);
+  };
+
+  const handleBackspaceEnd = () => {
+    // Limpiar timers
+    if (deleteTimeoutRef.current) {
+      clearTimeout(deleteTimeoutRef.current);
+      deleteTimeoutRef.current = null;
+    }
+    if (deleteIntervalRef.current) {
+      clearInterval(deleteIntervalRef.current);
+      deleteIntervalRef.current = null;
+    }
+  };
+
+  // Limpiar timers cuando se desmonte el componente
+  useEffect(() => {
+    return () => {
+      handleBackspaceEnd();
+    };
+  }, []);
+
+  // Actualizar amount cuando cambie la expresión
+  useEffect(() => {
+    if (isAmountFocused) {
+      const { value, error } = evaluateExpression(expression, lastValidAmount);
+      
+      if (error) {
+        setValidationError(error);
+        // No actualizar amount si hay error, mantener último valor válido
+      } else {
+        setValidationError('');
+        setAmount(value.toString());
+        setLastValidAmount(value.toString());
+      }
+    }
+  }, [expression, isAmountFocused, lastValidAmount]);
 
 
   return (
@@ -396,149 +531,406 @@ export default function AddTransaction() {
         style={addTransactionStyles.contentContainer}
         edges={["left", "right", "bottom"]}
       >
-        <ScrollView
-          style={addTransactionStyles.content}
-          showsVerticalScrollIndicator={false}
-        >
-          {/* Selector de fecha */}
-          <View style={[formStyles.fieldGroup, { marginTop: spacing[2] }]}>
-            <Text style={formStyles.label}>Fecha</Text>
-            <TouchableOpacity
-              style={addTransactionStyles.dateSelector}
-              onPress={showDatepicker}
+        {!isAmountFocused ? (
+          <KeyboardAvoidingView
+            style={{ flex: 1 }}
+            behavior={Platform.OS === "ios" ? "padding" : undefined}
+            keyboardVerticalOffset={Platform.OS === "ios" ? 64 : 0}
+          >
+            <ScrollView
+              style={addTransactionStyles.content}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+              contentContainerStyle={{ paddingBottom: isKeyboardVisible ? 20 : 100 }}
             >
-              <Text style={addTransactionStyles.dateText}>
-                {formatDate(selectedDate)}
-              </Text>
-              <CalendarOutlineIcon
+            {/* Toggle tipo de transacción */}
+            <View style={[formStyles.fieldGroup, { marginTop: spacing[2] }]}>
+              <Text style={formStyles.label}>Tipo</Text>
+              <View style={addTransactionStyles.toggleContainer}>
+                <TouchableOpacity
+                  style={[
+                    addTransactionStyles.toggleButton,
+                    transactionType === "GASTO" &&
+                      addTransactionStyles.activeToggleButton,
+                  ]}
+                  onPress={() => setTransactionType("GASTO")}
+                >
+                  <Text
+                    style={[
+                      addTransactionStyles.toggleText,
+                      transactionType === "GASTO" &&
+                        addTransactionStyles.activeToggleText,
+                    ]}
+                  >
+                    GASTO
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    addTransactionStyles.toggleButton,
+                    transactionType === "INGRESO" &&
+                      addTransactionStyles.activeToggleButton,
+                  ]}
+                  onPress={() => setTransactionType("INGRESO")}
+                >
+                  <Text
+                    style={[
+                      addTransactionStyles.toggleText,
+                      transactionType === "INGRESO" &&
+                        addTransactionStyles.activeToggleText,
+                    ]}
+                  >
+                    INGRESO
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* Selector de fecha */}
+            <View style={formStyles.fieldGroup}>
+              <Text style={formStyles.label}>Fecha</Text>
+              <TouchableOpacity
+                style={addTransactionStyles.dateSelector}
+                onPress={showDatepicker}
+              >
+                <Text style={addTransactionStyles.dateText}>
+                  {formatDate(selectedDate)}
+                </Text>
+                <CalendarOutlineIcon
+                  width={20}
+                  height={20}
+                  color={colors.primary[500]}
+                />
+              </TouchableOpacity>
+            </View>
+
+            {/* Selector de cuenta */}
+            <View style={formStyles.fieldGroup}>
+              <Text style={formStyles.label}>Cuenta</Text>
+              <TouchableOpacity
+                style={addTransactionStyles.accountSelector}
+                onPress={() => setShowAccountSelector(true)}
+              >
+                <View style={addTransactionStyles.accountSelectorLeft}>
+                  <Text style={addTransactionStyles.accountSelectorSymbol}>
+                    {selectedAccount?.symbol || "💰"}
+                  </Text>
+                  <View style={addTransactionStyles.accountSelectorInfo}>
+                    <Text style={addTransactionStyles.accountSelectorName}>
+                      {selectedAccount?.name || "Seleccionar cuenta"}
+                    </Text>
+                    <Text style={addTransactionStyles.accountSelectorBalance}>
+                      Balance:{" "}
+                      {selectedAccount?.balance?.toLocaleString("es-CO") || "0"}{" "}
+                      {selectedAccount?.currency || "COP"}
+                    </Text>
+                  </View>
+                </View>
+                <ChevronDownIcon
+                  width={16}
+                  height={16}
+                  color={colors.neutral.white}
+                />
+              </TouchableOpacity>
+            </View>
+
+            {/* Campo de monto */}
+            <View style={formStyles.fieldGroup}>
+              <Text style={formStyles.label}>Monto</Text>
+              <TouchableOpacity
+                style={addTransactionStyles.amountInputContainer}
+                onPress={() => {
+                  setIsAmountFocused(true);
+                  setExpression(amount === "0" ? "0" : amount);
+                  setValidationError("");
+                  setLastValidAmount(amount);
+                }}
+                activeOpacity={0.7}
+              >
+                <Text style={addTransactionStyles.amountInputText}>
+                  {parseFloat(amount).toLocaleString("es-CO", {
+                    minimumFractionDigits: 0,
+                    maximumFractionDigits: 2,
+                  })}
+                </Text>
+                <Text style={addTransactionStyles.amountCurrency}>
+                  {selectedAccount?.currency || "COP"}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Campo de nota */}
+            <View style={formStyles.fieldGroup}>
+              <Text style={formStyles.label}>Nota (opcional)</Text>
+              <TextInput
+                style={addTransactionStyles.noteInput}
+                placeholder="Agregar una nota..."
+                placeholderTextColor="#ADADAD"
+                value={note}
+                onChangeText={setNote}
+                multiline
+                numberOfLines={3}
+              />
+            </View>
+          </ScrollView>
+          </KeyboardAvoidingView>
+        ) : (
+          <View style={addTransactionStyles.keypadView}>
+            {/* Botón cerrar */}
+            <TouchableOpacity
+              style={addTransactionStyles.keypadCloseButton}
+              onPress={() => {
+                setIsAmountFocused(false);
+                setExpression(amount);
+                setValidationError("");
+              }}
+            >
+              <CloseIcon
                 width={20}
                 height={20}
-                color={colors.primary[500]}
+                color={colors.text.tertiary}
               />
             </TouchableOpacity>
-          </View>
 
-          {/* Selector de cuenta */}
-          <View style={formStyles.fieldGroup}>
-            <Text style={formStyles.label}>Cuenta</Text>
-            <TouchableOpacity
-              style={addTransactionStyles.accountSelector}
-              onPress={() => setShowAccountSelector(true)}
-            >
-              <View style={addTransactionStyles.accountSelectorLeft}>
-                <Text style={addTransactionStyles.accountSelectorSymbol}>
-                  {selectedAccount?.symbol || "💰"}
-                </Text>
-                <View style={addTransactionStyles.accountSelectorInfo}>
-                  <Text style={addTransactionStyles.accountSelectorName}>
-                    {selectedAccount?.name || "Seleccionar cuenta"}
+            {/* Campo de monto con expresión y resultado */}
+            <View style={addTransactionStyles.amountDisplayContainer}>
+              {/* Display unificado */}
+              <View style={addTransactionStyles.calculatorDisplay}>
+                <ScrollView 
+                  horizontal 
+                  showsHorizontalScrollIndicator={false}
+                  style={addTransactionStyles.expressionScrollView}
+                >
+                  <TextInput
+                    style={addTransactionStyles.calculatorExpression}
+                    value={expression}
+                    editable={false}
+                    showSoftInputOnFocus={false}
+                    caretHidden={true}
+                    selectTextOnFocus={false}
+                  />
+                </ScrollView>
+                <View style={addTransactionStyles.calculatorResultRow}>
+                  <Text style={addTransactionStyles.calculatorResult} numberOfLines={1}>
+                    = {parseFloat(amount).toLocaleString("es-CO", {
+                      minimumFractionDigits: 0,
+                      maximumFractionDigits: 2,
+                    })}
                   </Text>
-                  <Text style={addTransactionStyles.accountSelectorBalance}>
-                    Balance:{" "}
-                    {selectedAccount?.balance?.toLocaleString("es-CO") || "0"}{" "}
+                  <Text style={addTransactionStyles.calculatorCurrency}>
                     {selectedAccount?.currency || "COP"}
                   </Text>
                 </View>
               </View>
-              <ChevronDownIcon
-                width={16}
-                height={16}
-                color={colors.neutral.white}
-              />
-            </TouchableOpacity>
-          </View>
+              
+              {validationError && (
+                <View style={addTransactionStyles.validationErrorContainer}>
+                  <Text style={addTransactionStyles.validationErrorText}>
+                    {validationError}
+                  </Text>
+                </View>
+              )}
+            </View>
 
-          {/* Toggle tipo de transacción */}
-          <View style={formStyles.fieldGroup}>
-            <Text style={formStyles.label}>Tipo</Text>
-            <View style={addTransactionStyles.toggleContainer}>
+            {/* Teclado numérico con calculadora integrado */}
+            <View style={addTransactionStyles.keypadContainer}>
+              {/* Fila 1: C, (), %, + */}
+              <View style={addTransactionStyles.keypadRow}>
+                <TouchableOpacity
+                  style={[addTransactionStyles.keypadButton, addTransactionStyles.clearButton]}
+                  onPress={handleClear}
+                >
+                  <Text style={[addTransactionStyles.keypadButtonText, addTransactionStyles.clearButtonText]}>C</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[addTransactionStyles.keypadButton, addTransactionStyles.operatorButton]}
+                  onPress={handleParenthesis}
+                >
+                  <Text style={[addTransactionStyles.keypadButtonText, addTransactionStyles.operatorButtonText]}>()</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[addTransactionStyles.keypadButton, addTransactionStyles.operatorButton]}
+                  onPress={() => handleCalculatorInput("%")}
+                >
+                  <Text style={[addTransactionStyles.keypadButtonText, addTransactionStyles.operatorButtonText]}>%</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[addTransactionStyles.keypadButton, addTransactionStyles.operatorButton]}
+                  onPress={() => handleCalculatorInput("+")}
+                >
+                  <Text style={[addTransactionStyles.keypadButtonText, addTransactionStyles.operatorButtonText]}>+</Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Fila 2: 7, 8, 9, − */}
+              <View style={addTransactionStyles.keypadRow}>
+                <TouchableOpacity
+                  style={addTransactionStyles.keypadButton}
+                  onPress={() => handleCalculatorInput("7")}
+                >
+                  <Text style={addTransactionStyles.keypadButtonText}>7</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={addTransactionStyles.keypadButton}
+                  onPress={() => handleCalculatorInput("8")}
+                >
+                  <Text style={addTransactionStyles.keypadButtonText}>8</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={addTransactionStyles.keypadButton}
+                  onPress={() => handleCalculatorInput("9")}
+                >
+                  <Text style={addTransactionStyles.keypadButtonText}>9</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[addTransactionStyles.keypadButton, addTransactionStyles.operatorButton]}
+                  onPress={() => handleCalculatorInput("−")}
+                >
+                  <Text style={[addTransactionStyles.keypadButtonText, addTransactionStyles.operatorButtonText]}>−</Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Fila 3: 4, 5, 6, × */}
+              <View style={addTransactionStyles.keypadRow}>
+                <TouchableOpacity
+                  style={addTransactionStyles.keypadButton}
+                  onPress={() => handleCalculatorInput("4")}
+                >
+                  <Text style={addTransactionStyles.keypadButtonText}>4</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={addTransactionStyles.keypadButton}
+                  onPress={() => handleCalculatorInput("5")}
+                >
+                  <Text style={addTransactionStyles.keypadButtonText}>5</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={addTransactionStyles.keypadButton}
+                  onPress={() => handleCalculatorInput("6")}
+                >
+                  <Text style={addTransactionStyles.keypadButtonText}>6</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[addTransactionStyles.keypadButton, addTransactionStyles.operatorButton]}
+                  onPress={() => handleCalculatorInput("×")}
+                >
+                  <Text style={[addTransactionStyles.keypadButtonText, addTransactionStyles.operatorButtonText]}>×</Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Fila 4: 1, 2, 3, ÷ */}
+              <View style={addTransactionStyles.keypadRow}>
+                <TouchableOpacity
+                  style={addTransactionStyles.keypadButton}
+                  onPress={() => handleCalculatorInput("1")}
+                >
+                  <Text style={addTransactionStyles.keypadButtonText}>1</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={addTransactionStyles.keypadButton}
+                  onPress={() => handleCalculatorInput("2")}
+                >
+                  <Text style={addTransactionStyles.keypadButtonText}>2</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={addTransactionStyles.keypadButton}
+                  onPress={() => handleCalculatorInput("3")}
+                >
+                  <Text style={addTransactionStyles.keypadButtonText}>3</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[addTransactionStyles.keypadButton, addTransactionStyles.operatorButton]}
+                  onPress={() => handleCalculatorInput("÷")}
+                >
+                  <Text style={[addTransactionStyles.keypadButtonText, addTransactionStyles.operatorButtonText]}>÷</Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Fila 5: 0, ., ⌫, ÷ */}
+              <View style={addTransactionStyles.keypadRow}>
+                <TouchableOpacity
+                  style={addTransactionStyles.keypadButton}
+                  onPress={() => handleCalculatorInput("0")}
+                >
+                  <Text style={addTransactionStyles.keypadButtonText}>0</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={addTransactionStyles.keypadButton}
+                  onPress={handleCalculatorDecimal}
+                >
+                  <Text style={addTransactionStyles.keypadButtonText}>.</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={addTransactionStyles.keypadButton}
+                  onPressIn={handleBackspaceStart}
+                  onPressOut={handleBackspaceEnd}
+                >
+                  <Text style={addTransactionStyles.keypadButtonText}>⌫</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[addTransactionStyles.keypadButton, addTransactionStyles.operatorButton]}
+                  onPress={() => handleCalculatorInput("÷")}
+                >
+                  <Text style={[addTransactionStyles.keypadButtonText, addTransactionStyles.operatorButtonText]}>÷</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* Botón Confirmar */}
+            <View style={addTransactionStyles.keypadActions}>
               <TouchableOpacity
                 style={[
-                  addTransactionStyles.toggleButton,
-                  transactionType === "GASTO" &&
-                    addTransactionStyles.activeToggleButton,
+                  addTransactionStyles.keypadConfirmButton,
+                  (validationError || parseFloat(amount) <= 0) && addTransactionStyles.disabledButton
                 ]}
-                onPress={() => setTransactionType("GASTO")}
+                onPress={() => {
+                  if (!validationError && parseFloat(amount) > 0) {
+                    setIsAmountFocused(false);
+                    setExpression(amount);
+                    setValidationError("");
+                  }
+                }}
+                disabled={validationError !== "" || parseFloat(amount) <= 0}
               >
-                <Text
-                  style={[
-                    addTransactionStyles.toggleText,
-                    transactionType === "GASTO" &&
-                      addTransactionStyles.activeToggleText,
-                  ]}
-                >
-                  GASTO
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  addTransactionStyles.toggleButton,
-                  transactionType === "INGRESO" &&
-                    addTransactionStyles.activeToggleButton,
-                ]}
-                onPress={() => setTransactionType("INGRESO")}
-              >
-                <Text
-                  style={[
-                    addTransactionStyles.toggleText,
-                    transactionType === "INGRESO" &&
-                      addTransactionStyles.activeToggleText,
-                  ]}
-                >
-                  INGRESO
+                <Text style={[
+                  addTransactionStyles.keypadConfirmButtonText,
+                  (validationError || parseFloat(amount) <= 0) && addTransactionStyles.disabledButtonText
+                ]}>
+                  Confirmar
                 </Text>
               </TouchableOpacity>
             </View>
           </View>
+        )}
 
-          {/* Campo de nota */}
-          <View style={formStyles.fieldGroup}>
-            <Text style={formStyles.label}>Nota (opcional)</Text>
-            <TextInput
-              style={addTransactionStyles.noteInput}
-              placeholder="Agregar una nota..."
-              placeholderTextColor="#ADADAD"
-              value={note}
-              onChangeText={setNote}
-              multiline
-              numberOfLines={3}
-            />
-          </View>
-        </ScrollView>
-        {/* Calculadora al inicio */}
-        <View style={addTransactionStyles.calculatorSection}>
-          <Calculator
-            key={calcResetKey}
-            onAmountChange={setAmount}
-            initialValue={amount}
-          />
-        </View>
-        {/* Botón Continuar Flotante */}
-        <View style={addTransactionStyles.floatingButtonContainer}>
-          <TouchableOpacity
-            style={[
-              addTransactionStyles.floatingButton,
-              parseFloat(amount) <= 0 && addTransactionStyles.disabledButton,
-            ]}
-            onPress={handleContinue}
-            disabled={parseFloat(amount) <= 0}
-          >
-            <Text
+        {/* Botón Continuar Flotante - solo visible cuando no está el teclado */}
+        {!isAmountFocused && !isKeyboardVisible && (
+          <View style={addTransactionStyles.floatingButtonContainer}>
+            <TouchableOpacity
               style={[
-                addTransactionStyles.floatingButtonText,
-                parseFloat(amount) <= 0 &&
-                  addTransactionStyles.disabledButtonText,
+                addTransactionStyles.floatingButton,
+                (parseFloat(amount) <= 0 || parseFloat(amount) > MAX_AMOUNT) && addTransactionStyles.disabledButton,
               ]}
+              onPress={handleContinue}
+              disabled={parseFloat(amount) <= 0 || parseFloat(amount) > MAX_AMOUNT}
             >
-              Continuar
-            </Text>
-            <ArrowForwardIcon
-              width={20}
-              height={20}
-              color={colors.neutral.white}
-            />
-          </TouchableOpacity>
-        </View>
+              <Text
+                style={[
+                  addTransactionStyles.floatingButtonText,
+                  (parseFloat(amount) <= 0 || parseFloat(amount) > MAX_AMOUNT) &&
+                    addTransactionStyles.disabledButtonText,
+                ]}
+              >
+                Continuar
+              </Text>
+              <ArrowForwardIcon
+                width={20}
+                height={20}
+                color={colors.neutral.white}
+              />
+            </TouchableOpacity>
+          </View>
+        )}
       </SafeAreaView>
 
       {/* Date Picker Modal con Calendario */}
@@ -660,6 +1052,7 @@ export default function AddTransaction() {
           </View>
         </View>
       )}
+
     </View>
   );
 }

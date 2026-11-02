@@ -17,10 +17,3 @@ export interface Category {
   type: TransactionType;
   isExpense: boolean;
 }
-
-export interface CalculatorState {
-  display: string;
-  previousValue: number | null;
-  currentOperation: string | null;
-  waitingForOperand: boolean;
-}

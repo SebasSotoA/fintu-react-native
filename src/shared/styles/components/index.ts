@@ -19,7 +19,7 @@ export { transferStyles } from "./transfer";
 
 // Estilos de componentes reutilizables
 export { buttonStyles, buttonTextStyles } from "./buttons";
-export { calculatorStyles } from "./calculator";
+export { numericKeypadBottomSheetStyles } from "./numeric-keypad-bottom-sheet";
 export { badgeStyles, badgeTextStyles, cardStyles } from "./cards";
 export { drawerStyles, drawerTextStyles, drawerVariants } from "./drawer";
 export { editAccountModalStyles } from "./edit-account-modal";
@@ -35,7 +35,6 @@ export { singleDateCalendarStyles } from "./single-date-calendar";
 // Re-exportar para compatibilidad
 export { accountsStyles as accounts } from "./accounts";
 export { buttonStyles as buttons } from "./buttons";
-export { calculatorStyles as calculator } from "./calculator";
 export { cardStyles as cards } from "./cards";
 export { categoriesStyles as categories } from "./categories";
 export { dashboardStyles as dashboard } from "./dashboard";
